@@ -1,0 +1,98 @@
+name: Build desktop apps and publish release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build Windows executable
+        if: runner.os == 'Windows'
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile --windowed
+          --name ShopifyAIStoreManager --collect-all customtkinter
+          --collect-submodules langchain_google_genai
+          --collect-submodules langchain_core
+          --collect-submodules keyring.backends app.py
+
+      - name: Build macOS application bundle
+        if: runner.os == 'macOS'
+        run: >-
+          python -m PyInstaller --noconfirm --clean --windowed
+          --name ShopifyAIStoreManager --collect-all customtkinter
+          --collect-submodules langchain_google_genai
+          --collect-submodules langchain_core
+          --collect-submodules keyring.backends app.py
+
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/ShopifyAIStoreManager.app dist/ShopifyAIStoreManager-macOS.zip
+
+      - name: Upload Windows executable
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: dist/ShopifyAIStoreManager.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload macOS application
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos
+          path: dist/ShopifyAIStoreManager-macOS.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download platform builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create a release for this main-branch build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_TAG: build-${{ github.run_number }}-${{ github.run_attempt }}
+        run: >-
+          gh release create "$BUILD_TAG" release-assets/*
+          --repo "$GITHUB_REPOSITORY"
+          --target "$GITHUB_SHA"
+          --title "Desktop build $GITHUB_RUN_NUMBER (attempt $GITHUB_RUN_ATTEMPT)"
+          --notes "Automated Windows and macOS build from commit $GITHUB_SHA."
+
