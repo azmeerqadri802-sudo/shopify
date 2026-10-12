@@ -1,25 +1,24 @@
-name: Shopify AI Manager V2 Windows Release
+name: OmniStore V3 Windows Build and Release
 
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
-  release:
-    types: [published]
 
 permissions:
   contents: write
 
 concurrency:
-  group: shopify-ai-manager-release-${{ github.ref }}
+  group: omnistore-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build-release:
+  build-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
-      - name: Check out tagged source
+      - name: Check out source
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -33,38 +32,42 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      - name: Build Windows one-file executable
+      - name: Build standalone Windows executable
         run: >
           python -m PyInstaller --noconfirm --clean --onefile --noconsole
-          --name ShopifyAIManager
+          --name OmniStoreAIManager
           --collect-all PyQt6
           --collect-all pyqtgraph
+          --collect-all google.genai
+          --collect-all googleapiclient
           --collect-all keyring
-          --collect-submodules langchain_core
-          --collect-submodules langchain_google_genai
+          --collect-all botocore
+          --collect-all boto3
           --collect-submodules speech_recognition
           --collect-binaries pyaudio
           --hidden-import PyQt6.sip
           --hidden-import keyring.backends.Windows
+          --hidden-import google.auth.transport.requests
           app.py
 
       - name: Verify executable
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/ShopifyAIManager.exe")) {
-            throw "PyInstaller did not produce dist/ShopifyAIManager.exe"
+          if (!(Test-Path "dist/OmniStoreAIManager.exe")) {
+            throw "PyInstaller did not produce dist/OmniStoreAIManager.exe"
           }
-          Get-Item "dist/ShopifyAIManager.exe" | Select-Object Name, Length
+          Get-Item "dist/OmniStoreAIManager.exe" | Select-Object Name, Length
 
-      - name: Keep the build artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ShopifyAIManager-Windows
-          path: dist/ShopifyAIManager.exe
+          name: OmniStoreAIManager-Windows
+          path: dist/OmniStoreAIManager.exe
           if-no-files-found: error
           retention-days: 14
 
-      - name: Create or update the GitHub Release
+      - name: Publish executable to tagged GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
@@ -72,11 +75,10 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "dist/ShopifyAIManager.exe" --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag "dist/OmniStoreAIManager.exe" --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            gh release create $tag "dist/ShopifyAIManager.exe" --repo $env:GITHUB_REPOSITORY --title "Shopify AI Manager $tag" --notes "Automated V2 desktop build from commit $env:GITHUB_SHA."
+            gh release create $tag "dist/OmniStoreAIManager.exe" --repo $env:GITHUB_REPOSITORY --title "OmniStore AI Manager $tag" --notes "Automated V3 Windows desktop build from commit $env:GITHUB_SHA."
           }
           if ($LASTEXITCODE -ne 0) {
-            throw "GitHub Release upload failed."
+            throw "GitHub Release creation or asset upload failed."
           }
-

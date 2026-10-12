@@ -1,7 +1,6 @@
-"""Shopify AI Manager application entry point."""
+"""OmniStore AI Manager desktop entry point."""
 
-from shopify_agent.ui import run
+from omnistore.ui import run
 
 if __name__ == "__main__":
     raise SystemExit(run())
-

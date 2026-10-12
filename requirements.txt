@@ -1,9 +1,20 @@
-PyQt6>=6.8,<7
-pyqtgraph>=0.13.7,<1
-SpeechRecognition[audio]>=3.14,<4
-langchain-core>=1.0,<2
-langchain-google-genai>=4.0,<5
-keyring>=25,<27
-platformdirs>=4,<5
-requests>=2.32,<3
+# Desktop interface and charts
+PyQt6>=6.7
+pyqtgraph>=0.13.7
 
+# Gemini AI, voice, and bulk document ingestion
+google-genai>=1.30
+SpeechRecognition[audio]>=3.14
+pandas>=2.2
+openpyxl>=3.1
+python-docx>=1.1
+google-api-python-client>=2.160
+google-auth>=2.38
+
+# Marketplace APIs and secure local storage
+requests>=2.32
+boto3>=1.37
+botocore>=1.37
+cryptography>=44
+keyring>=25
+platformdirs>=4
