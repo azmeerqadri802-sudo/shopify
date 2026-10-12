@@ -458,7 +458,15 @@ def canonical_remote(value: str) -> str:
 
 
 def contained_path(root: Path, relative: str) -> Path:
-    candidate = (root / relative).resolve()
+    raw_path = root / relative
+    cursor = root
+    for part in Path(relative).parts:
+        if part in {"", ".", ".."}:
+            raise RuntimeError(f"Refusing an unsafe repository path: {relative}")
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise RuntimeError(f"Refusing a symbolic link in generated path: {relative}")
+    candidate = raw_path.resolve()
     if candidate == root or root not in candidate.parents:
         raise RuntimeError(f"Refusing a path outside the repository: {relative}")
     return candidate
