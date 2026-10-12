@@ -1,27 +1,25 @@
-name: Build desktop apps and publish release
+name: Shopify AI Manager V2 Windows Release
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags:
+      - "v*"
+  release:
+    types: [published]
 
 permissions:
   contents: write
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: shopify-ai-manager-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 45
     steps:
-      - name: Check out source
+      - name: Check out tagged source
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -30,69 +28,55 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt pyinstaller
+      - name: Install application and packaging dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
 
-      - name: Build Windows executable
-        if: runner.os == 'Windows'
-        run: >-
-          python -m PyInstaller --noconfirm --clean --onefile --windowed
-          --name ShopifyAIStoreManager --collect-all customtkinter
-          --collect-submodules langchain_google_genai
+      - name: Build Windows one-file executable
+        run: >
+          python -m PyInstaller --noconfirm --clean --onefile --noconsole
+          --name ShopifyAIManager
+          --collect-all PyQt6
+          --collect-all pyqtgraph
+          --collect-all keyring
           --collect-submodules langchain_core
-          --collect-submodules keyring.backends app.py
-
-      - name: Build macOS application bundle
-        if: runner.os == 'macOS'
-        run: >-
-          python -m PyInstaller --noconfirm --clean --windowed
-          --name ShopifyAIStoreManager --collect-all customtkinter
           --collect-submodules langchain_google_genai
-          --collect-submodules langchain_core
-          --collect-submodules keyring.backends app.py
+          --collect-submodules speech_recognition
+          --collect-binaries pyaudio
+          --hidden-import PyQt6.sip
+          --hidden-import keyring.backends.Windows
+          app.py
 
-      - name: Package macOS application
-        if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent dist/ShopifyAIStoreManager.app dist/ShopifyAIStoreManager-macOS.zip
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/ShopifyAIManager.exe")) {
+            throw "PyInstaller did not produce dist/ShopifyAIManager.exe"
+          }
+          Get-Item "dist/ShopifyAIManager.exe" | Select-Object Name, Length
 
-      - name: Upload Windows executable
-        if: runner.os == 'Windows'
+      - name: Keep the build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-windows
-          path: dist/ShopifyAIStoreManager.exe
+          name: ShopifyAIManager-Windows
+          path: dist/ShopifyAIManager.exe
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
 
-      - name: Upload macOS application
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-macos
-          path: dist/ShopifyAIStoreManager-macOS.zip
-          if-no-files-found: error
-          retention-days: 7
-
-  release:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download platform builds
-        uses: actions/download-artifact@v4
-        with:
-          pattern: desktop-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Create a release for this main-branch build
+      - name: Create or update the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_TAG: build-${{ github.run_number }}-${{ github.run_attempt }}
-        run: >-
-          gh release create "$BUILD_TAG" release-assets/*
-          --repo "$GITHUB_REPOSITORY"
-          --target "$GITHUB_SHA"
-          --title "Desktop build $GITHUB_RUN_NUMBER (attempt $GITHUB_RUN_ATTEMPT)"
-          --notes "Automated Windows and macOS build from commit $GITHUB_SHA."
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "dist/ShopifyAIManager.exe" --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag "dist/ShopifyAIManager.exe" --repo $env:GITHUB_REPOSITORY --title "Shopify AI Manager $tag" --notes "Automated V2 desktop build from commit $env:GITHUB_SHA."
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release upload failed."
+          }
 

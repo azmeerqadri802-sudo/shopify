@@ -1,2 +1,4 @@
-# Core services for the Shopify AI Store Manager.
+"""Shopify AI Manager V2 package."""
+
+__version__ = "2.0.0"
 

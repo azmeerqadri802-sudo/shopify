@@ -1,46 +1,53 @@
-# Shopify AI Store Manager
+# Shopify AI Manager V2.0
 
-A Windows/macOS desktop client built with CustomTkinter. It connects to Google Gemini, Shopify Admin GraphQL, SMTP, and the official Meta WhatsApp Business Cloud API. The executable bundles the UI and Python runtime; these cloud-connected features still require internet access and valid credentials.
+An enterprise-style PyQt6 desktop cockpit for Shopify store operations: a frameless Windows 11 Mica/Acrylic window, animated AI status orb, interactive sales and inventory charts, microphone command entry, and a Gemini tool-calling agent.
 
-## Generate and publish this project
+This is a desktop client, not an unattended web service. Shopify, Gemini, search, SMTP, voice transcription and WhatsApp features need network access and valid third-party credentials.
 
-Run the supplied `build_and_push.py` from a working directory. It creates `shopify-ai-store-manager/`, writes the source and GitHub Actions workflow, initializes `main`, commits the generated files, configures `origin`, and pushes to GitHub. The push happens automatically when you run the script; it never force-pushes. The default remote is the repository URL supplied with the setup request; pass a different URL at the prompt or as an argument.
+## Local run and upgrade
 
-The GitHub Actions workflow builds a Windows `.exe` and a zipped macOS `.app`, then publishes both in a GitHub Release after each push to `main` (or a manual workflow dispatch). GitHub Actions must be enabled and the workflow token must have permission to create releases.
+1. Install Python 3.12 and Git.
+2. Create a virtual environment and install dependencies with python -m pip install -r requirements.txt.
+3. Start the UI with python app.py.
+4. Configure credentials in Settings.
 
-## Local development
+The master upgrade_to_v2.py script expects an existing clean Git checkout. It replaces the V1 source, writes the PyQt6 project, creates the V2 commit and v2.0.0 tag, then runs git push origin main --tags. It refuses to overwrite uncommitted work.
 
-1. Install Python 3.11+ and Git.
-2. Create and activate a virtual environment.
-3. Install dependencies with `python -m pip install -r requirements.txt`.
-4. Start the UI with `python app.py`.
-5. Enter credentials in **Settings** and click **Save settings**.
+## GitHub release
 
-The app stores non-secret preferences in the operating system's application settings directory. Gemini, Shopify, SMTP, and WhatsApp credentials, plus the destination WhatsApp number, are stored through Python Keyring (Windows Credential Manager or macOS Keychain). Sensitive values are never written to this repository or its JSON settings file. If the OS credential store is unavailable, saving credentials fails visibly rather than falling back to plaintext.
+Pushing a tag beginning with v builds the Windows no-console one-file executable with PyInstaller and publishes it as an asset on that GitHub Release. A published-release trigger is also supported for a pre-created release. GitHub Actions must be enabled and the workflow token must have contents: write permission.
 
-## Credentials and required access
+## Gemini and agent tools
 
-- **Gemini:** create a Gemini API key and choose an available model in Settings. The model field defaults to `gemini-3.8-flash`; model availability and pricing are controlled by Google and can change.
-- **Shopify:** enter the `https://your-store.myshopify.com` domain and an Admin API access token. Grant `write_products` to create draft products and `read_orders` to list recent orders. The app uses the versioned Admin GraphQL API; change its API version in Settings when Shopify advances the supported version.
-- **SMTP:** supply an SMTP server, port, account, password, and sender address. The app uses TLS/STARTTLS and sends plain-text replies only after confirmation.
-- **WhatsApp:** a recipient number alone is insufficient. Set up a Meta WhatsApp Business Cloud API sender, then provide its Phone Number ID, access token, and the destination number in Settings. Meta may require recipient opt-in and an approved template for messages outside an eligible service window. If you enter a template name, create an approved template with three body placeholders in this order: order name, total, item count. The Graph API version is configurable.
+Gemini 1.5 Pro is no longer listed in Google's current Gemini API model catalog. The default model is gemini-3.8-flash and can be changed in Settings to another model supported by the configured Google key. LangChain's Google integration provides function calling with a bounded tool loop.
 
-## Available agent tools
+- add_product(title, image_url, price): drafts SEO copy and creates a Shopify draft product with its initial price after approval.
+- handle_marketing(): creates email/social copy and returns it without publishing.
+- reply_to_email(customer_email, intent): drafts and sends a plain-text support reply after approval.
+- send_whatsapp_report(order_data): formats webhook-shaped order JSON and sends via Meta WhatsApp Cloud API after approval.
+- analyze_market_price(product_name): searches current public results through Tavily and produces an advisory range with URLs. Configure a Tavily API key.
+- predict_inventory(): estimates variant stock-out timing using sellable inventory and trailing 90-day order quantities.
+- analyze_sales(days): summarizes daily revenue and today's sales for the selected window.
 
-- `add_product(title, image_url, price)` asks Gemini for product copy, SEO fields, and tags, creates a Shopify **draft**, then sets its initial variant price. A non-empty image URL is attached as product media.
-- `handle_marketing()` generates email/social copy and returns it in the dashboard; it does not publish or send the copy.
-- `reply_to_email(customer_email, intent)` drafts a plain-text reply and sends it through SMTP after confirmation. The app does not read an inbox.
-- `send_whatsapp_report(order_data)` formats an order payload into a short notification and sends it through WhatsApp Cloud API.
+## Credentials and access
 
-Shopify product creation and outbound email require an on-screen approval by default. This can be changed in Settings, but the confirmation is a useful guard against mistaken model tool calls.
+Gemini, Shopify, SMTP, WhatsApp and Tavily secrets are stored via Python Keyring in Windows Credential Manager or macOS Keychain. Non-secret preferences go in the user's application config folder. If the OS vault is unavailable, the app reports an error and does not write secrets in plaintext.
 
-## Orders and webhooks
+Shopify scopes include read_orders, read_products, and write_products. Grant the minimum scopes that support your enabled features; inventory access may require an additional inventory read scope in your store. The API version defaults to 2026-10 and is editable in Settings.
 
-The Dashboard can request the latest Shopify orders on demand. Shopify webhook delivery needs a publicly reachable HTTPS endpoint and HMAC verification. A desktop app behind a home/office firewall has no public ingress by itself, so this project does **not** claim to receive Shopify webhooks directly. The WhatsApp reporting function accepts webhook-shaped order data when called by a trusted, separately hosted webhook receiver or another integration. Do not expose an unverified webhook endpoint to the internet.
+WhatsApp requires a Meta Business Cloud API sender, sender Phone Number ID, access token, recipient number, and recipient opt-in. Meta may require an approved message template. Email needs SMTP credentials. Competitor search needs a Tavily API key.
 
-## Packaging notes
+Voice commands record one utterance and send it to Google's speech-recognition endpoint for transcription. Speech transcription needs a microphone, OS permission and an internet connection.
 
-The Windows workflow produces `ShopifyAIStoreManager.exe`; the macOS workflow produces `ShopifyAIStoreManager-macOS.zip`. The macOS bundle is not code-signed or notarized. For broad macOS distribution, configure Apple signing/notarization credentials and add those steps to the workflow. API keys, Shopify tokens, SMTP passwords, and WhatsApp tokens must be entered separately on each installed machine.
+## Analytics limits
 
-This is an integration starter requiring store-specific configuration and operational review before unattended production use. Shopify scopes, Meta messaging policy, SMTP provider policy, model availability, data retention, and any legal requirements are the operator's responsibility.
+The sales chart displays up to 30 daily points from a trailing 90-day Shopify history query. Inventory uses current sellable quantities divided by average variant units sold per day. Results are estimates affected by seasonality, promotions, stock adjustments and incomplete history. Variants without tracked inventory or recent sales do not have a stock-out estimate.
+
+Shopify webhooks require a public HTTPS receiver and HMAC validation. This desktop application does not expose an inbound webhook endpoint; only a trusted integration should forward verified order data to the WhatsApp report tool.
+
+Windows applies native Mica where supported and falls back to Acrylic or the Qt dark surface. macOS keeps the premium dark UI and does not claim to have Windows blur. The executable is not code-signed; sign it before broad distribution.
+
+## Safeguards
+
+Product creation, email and WhatsApp sends require desktop approval by default. Disabling approval in Settings allows those actions without a confirmation dialog. Activity logs stay in memory for the current session. Review provider retention and privacy terms before using customer data.
 

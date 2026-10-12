@@ -1,8 +1,9 @@
-# Supported runtime: Python 3.11 or newer.
-customtkinter>=5.2.2,<7
-keyring>=25,<27
-platformdirs>=4.3,<5
-requests>=2.32,<3
-langchain-core>=0.3.72,<2
+PyQt6>=6.8,<7
+pyqtgraph>=0.13.7,<1
+SpeechRecognition[audio]>=3.14,<4
+langchain-core>=1.0,<2
 langchain-google-genai>=4.0,<5
+keyring>=25,<27
+platformdirs>=4,<5
+requests>=2.32,<3
 
