@@ -76,13 +76,20 @@ jobs:
         shell: pwsh
         run: |
           $tag = "v3.0.0"
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          $assets = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name' 2>$null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "The initial V3 release already exists; main builds do not replace release assets."
+            if ($assets -contains "OmniStoreAIManager.exe") {
+              Write-Host "The V3 executable is already attached; main builds do not replace it."
+            } else {
+              gh release upload $tag "dist/OmniStoreAIManager.exe" --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not attach OmniStoreAIManager.exe to the existing V3.0.0 release."
+              }
+            }
           } else {
-            gh release create $tag --target $env:GITHUB_SHA --repo $env:GITHUB_REPOSITORY --title "OmniStore AI Manager $tag" --notes "Automated V3 Windows desktop build."
+            gh release create $tag "dist/OmniStoreAIManager.exe" --target $env:GITHUB_SHA --repo $env:GITHUB_REPOSITORY --title "OmniStore AI Manager $tag" --notes "Automated V3 Windows desktop build."
             if ($LASTEXITCODE -ne 0) {
-              throw "Could not create the initial V3.0.0 release tag."
+              throw "Could not create the initial V3.0.0 release and attach its executable."
             }
           }
 
