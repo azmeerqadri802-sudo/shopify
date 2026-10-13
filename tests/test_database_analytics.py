@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import tempfile
+import sys
+from types import ModuleType
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 try:
-    from omnistore.database import SecureDatabase
-    DATABASE_IMPORT_ERROR = ""
-except ModuleNotFoundError as exc:
-    if exc.name not in {"keyring", "cryptography", "platformdirs"}:
-        raise
-    SecureDatabase = None  # type: ignore[assignment,misc]
-    DATABASE_IMPORT_ERROR = f"runtime dependency {exc.name} is not installed"
+    import keyring  # noqa: F401 - production module dependency
+except ModuleNotFoundError:
+    # The unit only needs the keyring interface to be patchable. CI installs
+    # the real dependency; this tiny shim lets source-only runtimes test SQLite.
+    keyring_stub = ModuleType("keyring")
+    keyring_stub.get_password = lambda *_args: None  # type: ignore[attr-defined]
+    keyring_stub.set_password = lambda *_args: None  # type: ignore[attr-defined]
+    sys.modules["keyring"] = keyring_stub
+
+from omnistore.database import SecureDatabase
 
 
 class LocalAnalyticsTests(unittest.TestCase):
-    @unittest.skipIf(SecureDatabase is None, DATABASE_IMPORT_ERROR)
     def test_orders_are_deduplicated_and_aggregated_by_day_and_currency(self) -> None:
         key_store: dict[tuple[str, str], str] = {}
 
@@ -26,7 +30,7 @@ class LocalAnalyticsTests(unittest.TestCase):
         def set_password(service: str, account: str, value: str) -> None:
             key_store[(service, account)] = value
 
-        with tempfile.TemporaryDirectory() as temp_dir, \
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as temp_dir, \
                 patch("keyring.get_password", side_effect=get_password), \
                 patch("keyring.set_password", side_effect=set_password):
             database = SecureDatabase(Path(temp_dir) / "test.sqlite3")
