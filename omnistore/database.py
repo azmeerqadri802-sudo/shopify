@@ -6,7 +6,8 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,51 @@ class SecureDatabase:
                 "UNIQUE(platform, external_id))"
             )
             db.execute("CREATE INDEX IF NOT EXISTS idx_orders_received ON orders(received_at DESC)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS daily_sales ("
+                "sales_date TEXT NOT NULL, currency TEXT NOT NULL, orders_count INTEGER NOT NULL DEFAULT 0, "
+                "gross_sales TEXT NOT NULL DEFAULT '0.00', PRIMARY KEY(sales_date,currency))"
+            )
+            # One-time backfill keeps analytics useful for existing installations.
+            if db.execute("SELECT 1 FROM daily_sales LIMIT 1").fetchone() is None:
+                self._rebuild_daily_sales(db)
+
+    @staticmethod
+    def _order_amount(order: dict[str, Any]) -> Decimal:
+        value = order.get("total_price") or order.get("total") or "0"
+        try:
+            amount = Decimal(str(value))
+            if not amount.is_finite():
+                return Decimal("0.00")
+            return max(Decimal("0.00"), amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, TypeError, ValueError):
+            return Decimal("0.00")
+
+    @staticmethod
+    def _order_currency(order: dict[str, Any]) -> str:
+        value = str(order.get("currency") or order.get("currency_code") or "UNK").strip().upper()
+        return value[:8] or "UNK"
+
+    def _rebuild_daily_sales(self, db: sqlite3.Connection) -> None:
+        """Recompute private local aggregates from encrypted historical orders."""
+        rows = db.execute("SELECT ciphertext,received_at FROM orders").fetchall()
+        aggregates: dict[tuple[str, str], tuple[int, Decimal]] = {}
+        for row in rows:
+            try:
+                order = json.loads(self._cipher.decrypt(row["ciphertext"]).decode("utf-8"))
+            except (InvalidToken, ValueError, UnicodeError):
+                continue
+            if not isinstance(order, dict):
+                continue
+            sales_date = str(row["received_at"])[:10]
+            currency = self._order_currency(order)
+            count, total = aggregates.get((sales_date, currency), (0, Decimal("0.00")))
+            aggregates[(sales_date, currency)] = (count + 1, total + self._order_amount(order))
+        db.executemany(
+            "INSERT INTO daily_sales(sales_date,currency,orders_count,gross_sales) VALUES(?,?,?,?)",
+            [(day, currency, count, str(total.quantize(Decimal("0.01"))))
+             for (day, currency), (count, total) in aggregates.items()],
+        )
 
     def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
         payload = json.dumps(credentials, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -115,7 +161,43 @@ class SecureDatabase:
                 "INSERT OR IGNORE INTO orders(platform,external_id,ciphertext,received_at) VALUES(?,?,?,?)",
                 (platform, str(external_id), ciphertext, timestamp),
             )
-            return cursor.rowcount == 1
+            if cursor.rowcount != 1:
+                return False
+            sales_date = timestamp[:10]
+            currency = self._order_currency(order)
+            amount = self._order_amount(order)
+            existing = db.execute(
+                "SELECT orders_count,gross_sales FROM daily_sales WHERE sales_date=? AND currency=?",
+                (sales_date, currency),
+            ).fetchone()
+            total = amount
+            count = 1
+            if existing:
+                count += int(existing["orders_count"])
+                total += Decimal(str(existing["gross_sales"]))
+            db.execute(
+                "INSERT INTO daily_sales(sales_date,currency,orders_count,gross_sales) VALUES(?,?,?,?) "
+                "ON CONFLICT(sales_date,currency) DO UPDATE SET orders_count=excluded.orders_count, "
+                "gross_sales=excluded.gross_sales",
+                (sales_date, currency, count, str(total.quantize(Decimal("0.01")))),
+            )
+            return True
+
+    def daily_sales(self, days: int = 90) -> list[dict[str, Any]]:
+        """Return daily aggregates only; order/customer payloads never leave SQLite."""
+        days = max(1, min(int(days), 366))
+        cutoff = (datetime.now(timezone.utc).date() - timedelta(days=days - 1)).isoformat()
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT sales_date,currency,orders_count,gross_sales FROM daily_sales "
+                "WHERE sales_date>=? ORDER BY sales_date,currency", (cutoff,)
+            ).fetchall()
+        return [{
+            "sales_date": str(row["sales_date"]),
+            "currency": str(row["currency"]),
+            "orders_count": int(row["orders_count"]),
+            "gross_sales": float(row["gross_sales"]),
+        } for row in rows]
 
     def recent_orders(self, limit: int = 25) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))

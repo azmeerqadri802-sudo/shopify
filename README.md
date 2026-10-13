@@ -12,6 +12,12 @@ A PyQt6 desktop cockpit for omnichannel digital-accessory operations. The single
 
 Credentials and order payloads are encrypted in the local SQLite database. The Fernet key is stored in Windows Credential Manager or macOS Keychain. The application refuses to save credentials if an OS keychain backend is unavailable. No credentials are committed to Git.
 
+## Supabase cloud sync
+
+The optional **Supabase Cloud** Settings tab uses the pinned `supabase==2.32.0` Python SDK. Before enabling it, run [`supabase/setup.sql`](supabase/setup.sql) once in the project's Supabase SQL Editor, enable the `public` schema in the Data API if the project has restricted exposed schemas, and create/confirm a Supabase Auth email/password user. Enter the project URL, publishable (or legacy anon) key, and that user's email/password in Settings. The password and key remain in the encrypted local database. Secret/service-role keys are rejected.
+
+Cloud sync sends only fixed activity summaries and daily order-count/sales aggregates; raw orders, customer details, prompts, file paths, and marketplace credentials stay local. All cloud reads/writes run on a dedicated `QThread`. The included SQL enables RLS and grants authenticated users only the minimum select/insert/update permissions needed for their own rows. The dashboard reads back the signed-in user's activity and sales data. The session signs out when the worker shuts down.
+
 ## AI and voice
 
 Gemini uses the Google GenAI SDK with a bounded tool-calling loop for product creation, all-connected-store listings, bulk file ingestion, store-aware marketing, and customer support drafts. The default model is `gemini-3.8-flash`; Settings accepts another model ID supported by the configured API key. Gemini 1.5 Pro is no longer available in the current model catalog; consult [Google's model catalog](https://ai.google.dev/gemini-api/docs/models) and [deprecation schedule](https://ai.google.dev/gemini-api/docs/deprecations) before changing model IDs.

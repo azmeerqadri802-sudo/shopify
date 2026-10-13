@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
 import sys
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +29,7 @@ from .database import SecureDatabase
 from .services.agent import GeminiAgent
 from .services.bulk import SHEETS_RE
 from .services.channels import OrderIntegrations
+from .services.supabase_cloud import SupabaseCloudStore, SupabaseCredentials
 
 LOG = logging.getLogger(__name__)
 PLATFORMS = ["shopify", "daraz", "amazon", "ebay", "woocommerce", "tiktok_shop"]
@@ -106,6 +110,7 @@ class SettingsDialog(QDialog):
         for title in ("Shopify", "Daraz", "Amazon", "eBay", "WooCommerce", "TikTok Shop"):
             self._add_platform(tabs, title)
         self._add_google(tabs)
+        self._add_supabase(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
@@ -190,6 +195,29 @@ class SettingsDialog(QDialog):
         form.addRow(note)
         tabs.addTab(page, "Google API Credentials")
 
+    def _add_supabase(self, tabs: QTabWidget) -> None:
+        page = QWidget()
+        form = QFormLayout(page)
+        form.setVerticalSpacing(12)
+        current = self.db.get_credentials("supabase")
+        self._field(form, "supabase", "project_url", "Project URL", False, current)
+        self._field(form, "supabase", "publishable_key", "Publishable / anon key", True, current)
+        self._field(form, "supabase", "email", "Supabase Auth email", False, current)
+        self._field(form, "supabase", "password", "Supabase Auth password", True, current)
+        enabled = QCheckBox("Enable encrypted cloud sync for safe activity summaries and daily sales aggregates")
+        enabled.setChecked(bool(current.get("enabled", False)))
+        self.checks["supabase_enabled"] = enabled
+        form.addRow("Cloud sync", enabled)
+        note = QLabel(
+            "Only a publishable (or legacy anon) key is accepted. Never paste a secret/service-role key. "
+            "Credentials are encrypted in the local OS-keychain-backed database. Cloud tables must be "
+            "created with the included Supabase setup SQL; RLS limits records to the signed-in user."
+        )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        form.addRow(note)
+        tabs.addTab(page, "Supabase Cloud")
+
     def _save_group(self, group: str) -> dict[str, Any]:
         saved = self.db.get_credentials(group)
         for key, widget in self.inputs.get(group, {}).items():
@@ -200,13 +228,19 @@ class SettingsDialog(QDialog):
 
     def _save(self) -> None:
         try:
+            supabase = self._save_group("supabase")
+            supabase["enabled"] = self.checks["supabase_enabled"].isChecked()
+            if supabase["enabled"]:
+                SupabaseCredentials.from_mapping(supabase)
             for group in ("whatsapp", "smtp", "shopify", "daraz", "amazon", "ebay",
                           "woocommerce", "tiktok_shop", "google"):
                 if group in self.inputs:
                     self.db.save_credentials(group, self._save_group(group))
+            self.db.save_credentials("supabase", supabase)
             general = self._save_group("general")
             for key, checkbox in self.checks.items():
-                general[key] = checkbox.isChecked()
+                if key != "supabase_enabled":
+                    general[key] = checkbox.isChecked()
             general.setdefault("webhook_port", "8787")
             general.setdefault("poll_seconds", "180")
             self.db.save_credentials("general", general)
@@ -267,6 +301,112 @@ class VoiceThread(QThread):
             self.failed.emit(f"Voice capture unavailable: {exc}")
 
 
+class SupabaseSyncThread(QThread):
+    """Keep Supabase authentication and all cloud I/O off the Qt GUI thread."""
+
+    status = pyqtSignal(str)
+    snapshot = pyqtSignal(list, list)
+
+    def __init__(self, database: SecureDatabase, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.database = database
+        self._commands: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self._stop_requested = False
+
+    def configure(self, values: dict[str, Any]) -> None:
+        self._commands.put(("configure", dict(values)))
+
+    def record_activity(self, event_type: str, message: str) -> None:
+        self._commands.put(("activity", (event_type, message, str(uuid.uuid4()))))
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+        self._commands.put(("stop", None))
+
+    def run(self) -> None:
+        configuration: dict[str, Any] = {}
+        cloud: SupabaseCloudStore | None = None
+        pending: list[tuple[str, str, str]] = []
+        retry_at = 0.0
+        retry_delay = 15.0
+        next_analytics = 0.0
+        next_snapshot = 0.0
+        disabled_reported = False
+
+        while not self._stop_requested:
+            try:
+                command, payload = self._commands.get(timeout=0.5)
+            except queue.Empty:
+                command, payload = "", None
+
+            if command == "stop":
+                break
+            if command == "configure":
+                if cloud:
+                    cloud.close()
+                    cloud = None
+                configuration = payload or {}
+                pending.clear()  # Never send queued data across account changes.
+                retry_at = 0.0
+                retry_delay = 15.0
+                disabled_reported = False
+            elif command == "activity" and len(pending) < 500:
+                pending.append(payload)
+
+            if self._stop_requested:
+                break
+            if not configuration.get("enabled"):
+                if not disabled_reported:
+                    self.status.emit("Cloud sync disabled")
+                    disabled_reported = True
+                continue
+
+            now = time.monotonic()
+            if cloud is None:
+                if now < retry_at:
+                    continue
+                try:
+                    credentials = SupabaseCredentials.from_mapping(configuration)
+                    cloud = SupabaseCloudStore(credentials)
+                    cloud.connect()
+                    self.status.emit("Supabase connected · RLS-protected sync")
+                    retry_delay = 15.0
+                    next_analytics = next_snapshot = 0.0
+                except Exception as exc:
+                    cloud = None
+                    detail = str(exc) if isinstance(exc, ValueError) else "Sign-in failed; check Auth settings"
+                    self.status.emit(f"Supabase offline · {detail}")
+                    retry_at = now + retry_delay
+                    retry_delay = min(retry_delay * 2, 300.0)
+                    continue
+
+            try:
+                if pending:
+                    event_type, message, event_id = pending[0]
+                    cloud.record_activity(event_type, message, event_id)
+                    pending.pop(0)
+                now = time.monotonic()
+                if now >= next_analytics:
+                    cloud.upsert_daily_sales(self.database.daily_sales(90))
+                    next_analytics = now + 60.0
+                if now >= next_snapshot:
+                    activities, analytics = cloud.fetch_snapshot()
+                    self.snapshot.emit(activities, analytics)
+                    next_snapshot = now + 12.0
+            except Exception:
+                # Keep unsent activity for idempotent retry. Hide SDK details
+                # because network errors can include remote request metadata.
+                self.status.emit("Supabase sync needs attention · check table setup and RLS")
+                cloud.close()
+                cloud = None
+                retry_at = time.monotonic() + retry_delay
+                retry_delay = min(retry_delay * 2, 300.0)
+
+        if cloud:
+            cloud.close()
+        self.status.emit("Cloud sync stopped")
+
+
 class TargetDialog(QDialog):
     def __init__(self, configured: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -301,10 +441,18 @@ class OmniStoreWindow(QMainWindow):
         self._drag_position = None
         self._busy = False
         self.database = SecureDatabase()
+        self._cloud_seen_ids: set[str] = set()
+        self._cloud_analytics: list[dict[str, Any]] = []
+        self._cloud_close_requested = False
         self.log_signal.connect(self._append_log)
         self.integration_service: OrderIntegrations | None = None
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
+        self.cloud_worker = SupabaseSyncThread(self.database, self)
+        self.cloud_worker.status.connect(self._cloud_status)
+        self.cloud_worker.snapshot.connect(self._cloud_snapshot)
+        self.cloud_worker.start()
+        self._configure_cloud_sync()
         self._refresh_orders()
         self.orders_timer = QTimer(self)
         self.orders_timer.timeout.connect(self._refresh_orders)
@@ -483,9 +631,51 @@ class OmniStoreWindow(QMainWindow):
         scrollbar = self.logs.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def _configure_cloud_sync(self) -> None:
+        self.cloud_worker.configure(self.database.get_credentials("supabase"))
+
+    def _record_cloud_activity(self, event_type: str, message: str) -> None:
+        if hasattr(self, "cloud_worker"):
+            self.cloud_worker.record_activity(event_type, message)
+
+    def _cloud_status(self, message: str) -> None:
+        self.log_state.setText(f"●  {message}")
+
+    def _cloud_snapshot(self, activities: list, analytics: list) -> None:
+        self._cloud_analytics = [row for row in analytics if isinstance(row, dict)]
+        for row in reversed(activities):
+            if not isinstance(row, dict):
+                continue
+            event_id = str(row.get("id") or "")
+            if event_id and event_id not in self._cloud_seen_ids:
+                self._cloud_seen_ids.add(event_id)
+                self._append_log(f"☁  {row.get('message', 'Cloud activity')}")
+        if len(self._cloud_seen_ids) > 500:
+            self._cloud_seen_ids = set(list(self._cloud_seen_ids)[-250:])
+        self._paint_cloud_analytics()
+
+    def _paint_cloud_analytics(self) -> None:
+        if not self._cloud_analytics:
+            return
+        by_currency: dict[str, list[dict[str, Any]]] = {}
+        for row in self._cloud_analytics:
+            currency = str(row.get("currency") or "UNK")
+            by_currency.setdefault(currency, []).append(row)
+        currency = max(by_currency, key=lambda code: sum(float(r.get("gross_sales") or 0) for r in by_currency[code]))
+        rows = sorted(by_currency[currency], key=lambda r: str(r.get("sales_date") or ""))
+        values = [float(row.get("gross_sales") or 0) for row in rows]
+        self.chart.clear()
+        self.chart.plot(list(range(len(values))), values, pen=pg.mkPen("#22d3c5", width=2),
+                        symbol="o", symbolSize=7, symbolBrush="#68f0df")
+        self.chart.setTitle(f"Cloud sales · {currency}")
+        self.chart.setLabel("left", f"Sales ({currency})")
+        self.chart.setLabel("bottom", "Daily totals · Supabase")
+
     def _open_settings(self) -> None:
         if SettingsDialog(self.database, self).exec() == QDialog.DialogCode.Accepted:
+            self._configure_cloud_sync()
             self._log("Encrypted workspace settings saved")
+            self._record_cloud_activity("system", "Workspace settings updated")
             self._restart_integrations()
 
     def _adapters(self) -> dict[str, Any]:
@@ -564,6 +754,7 @@ class OmniStoreWindow(QMainWindow):
                             symbol="o", symbolSize=7, symbolBrush="#68f0df")
         self.chart.setLabel("left", "Order total")
         self.chart.setLabel("bottom", "Recent orders")
+        self._paint_cloud_analytics()
 
     def _targets_from_prompt(self, prompt: str) -> list[str]:
         normalized = prompt.lower()
@@ -640,6 +831,10 @@ class OmniStoreWindow(QMainWindow):
         if isinstance(result, dict) and "succeeded" in result and "failed" in result:
             self._log(f"Bulk import complete: {result.get('succeeded')} platform listings succeeded; "
                       f"{result.get('failed')} failed across {result.get('rows')} rows.")
+            self._record_cloud_activity(
+                "bulk", f"Bulk processing complete · {int(result.get('succeeded') or 0)} succeeded · "
+                f"{int(result.get('failed') or 0)} failed"
+            )
             failures = [item for item in result.get("results", []) if not item.get("ok")]
             for item in failures[:8]:
                 self._log(f"Row {item.get('row')} · {item.get('platform')}: {item.get('error')}")
@@ -647,10 +842,12 @@ class OmniStoreWindow(QMainWindow):
                 self._log(f"And {len(failures) - 8} more platform failures")
             return
         self._log(f"OmniStore: {message}")
+        self._record_cloud_activity("ai", "AI command completed")
 
     def _work_failed(self, message: str) -> None:
         self._finish_work()
         self._log(f"Action failed: {message}")
+        self._record_cloud_activity("ai", "AI action needs attention")
         QMessageBox.warning(self, "Action needs attention", message)
 
     def _voice_command(self) -> None:
@@ -719,6 +916,14 @@ class OmniStoreWindow(QMainWindow):
         super().mouseReleaseEvent(event)
 
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if hasattr(self, "cloud_worker") and self.cloud_worker.isRunning():
+            event.ignore()
+            if not self._cloud_close_requested:
+                self._cloud_close_requested = True
+                self.setEnabled(False)
+                self.cloud_worker.finished.connect(self.close)
+                self.cloud_worker.request_stop()
+            return
         if self.integration_service:
             self.integration_service.stop()
         if hasattr(self, "worker") and self.worker.isRunning():

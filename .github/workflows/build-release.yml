@@ -32,6 +32,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
+      - name: Verify imports and core cloud/database behavior
+        run: python -m unittest discover -s tests -v
+
       - name: Build standalone Windows executable
         run: >
           python -m PyInstaller --noconfirm --clean --onefile --noconsole
@@ -40,6 +43,11 @@ jobs:
           --collect-all pyqtgraph
           --collect-all google.genai
           --collect-all googleapiclient
+          --collect-all supabase
+          --collect-all postgrest
+          --collect-all storage3
+          --collect-all realtime
+          --collect-all supabase_auth
           --collect-all keyring
           --collect-all botocore
           --collect-all boto3
@@ -48,6 +56,7 @@ jobs:
           --hidden-import PyQt6.sip
           --hidden-import keyring.backends.Windows
           --hidden-import google.auth.transport.requests
+          --hidden-import supabase
           app.py
 
       - name: Verify executable
@@ -91,6 +100,27 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Could not create the initial V3.0.0 release and attach its executable."
             }
+          }
+
+      # The local checkout may not have a usable Git credential helper. The
+      # authenticated Actions token creates this one-time release tag after
+      # the main build succeeds; the normal tag workflow then publishes V3.2.
+      - name: Create the V3.2.0 release tag after the main build
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "v3.2.0"
+          gh api --silent "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "$tag already exists; leaving it unchanged."
+          } else {
+            gh api --method POST "repos/$env:GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:GITHUB_SHA"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not create release tag $tag."
+            }
+            Write-Host "Created $tag at $env:GITHUB_SHA; tag workflow will publish the release asset."
           }
 
       - name: Publish executable to tagged GitHub Release

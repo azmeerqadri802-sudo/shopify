@@ -18,3 +18,6 @@ botocore>=1.37
 cryptography>=44
 keyring>=25
 platformdirs>=4
+
+# Cloud activity + per-user analytics (pinned; never place a service-role key in a desktop client)
+supabase==2.32.0

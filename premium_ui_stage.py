@@ -519,6 +519,11 @@ def _premium_build_ui(self: Any) -> None:
     dashboard.addWidget(bulk_card, 1, 0)
 
     logs_card, logs_layout = _card("Real-time AI activity")
+    cloud_status = QLabel("●  Cloud sync initializing")
+    cloud_status.setObjectName("Muted")
+    cloud_status.setWordWrap(True)
+    self.log_state = cloud_status
+    logs_layout.addWidget(cloud_status)
     self.logs = QPlainTextEdit()
     self.logs.setReadOnly(True)
     self.logs.setMaximumBlockCount(2000)
