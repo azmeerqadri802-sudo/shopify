@@ -18,9 +18,9 @@ from typing import Any
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
 
 import pyqtgraph as pg
-from PyQt6.QtCore import QThread, QTimer, Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QThread, QTimer, Qt, QSize, QRectF, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QFont, QImage, QLinearGradient, QPainter, QPen, QRadialGradient, QRectF,
+    QColor, QFont, QImage, QLinearGradient, QPainter, QPen, QRadialGradient,
 )
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGraphicsDropShadowEffect,
